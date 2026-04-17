@@ -1,0 +1,67 @@
+{
+  "_comment": "Anahtar: firewall hostname / name / serialNumber (büyük-küçük harf duyarsız). Dashboard DIŞ IP'ler sütununa göre örnek. Kopya: firewall-wan-map.json",
+
+  "ANKARA-X01309HT2DD8Q10": {
+    "main": "5.177.152.74",
+    "backup": "5.177.137.42",
+    "notes": "Ankara"
+  },
+  "ANTALYA-X01309HT2DD8Q10": {
+    "main": "195.174.45.101",
+    "notes": "Antalya"
+  },
+  "BAGCILAR-X01309HT2DD8Q10": {
+    "main": "195.174.221.22",
+    "notes": "Bağcılar"
+  },
+  "BAKIRKOY-X01309HT2DD8Q10": {
+    "main": "95.173.6.61",
+    "backup": "195.174.221.15",
+    "notes": "Bakırköy"
+  },
+  "BODRUM-X01309HT2DD8Q10": {
+    "main": "95.173.5.119",
+    "notes": "Bodrum"
+  },
+  "BURSA-X01309HT2DD8Q10": {
+    "main": "195.174.221.20",
+    "notes": "Bursa"
+  },
+  "CAMLICA-X01309HT2DD8Q10": {
+    "main": "195.174.216.20",
+    "notes": "Çamlıca"
+  },
+  "CEVIZLIBAG-X01309HT2DD8Q10": {
+    "main": "195.174.221.16",
+    "notes": "Çevizlibağ"
+  },
+  "Fatih-X01309HT2DD8Q10": {
+    "main": "195.174.221.14",
+    "notes": "Fatih"
+  },
+  "GOKTURK-X01309HT2DD8Q10": {
+    "main": "37.154.173.55",
+    "notes": "Göktürk"
+  },
+  "KAYSERI1-X01309HT2DD8Q10": {
+    "main": "195.174.41.80",
+    "notes": "Kayseri"
+  },
+  "KOCAELI-X01309HT2DD8Q10": {
+    "main": "5.47.205.250",
+    "backup": "151.135.39.117",
+    "notes": "Ek dış IP: 46.104.40.120, 5.47.213.74, 5.47.213.0"
+  },
+  "MECIDIYEKOY-X01309HT2DD8Q10": {
+    "main": "176.240.13.200",
+    "notes": "Mecidiyeköy"
+  },
+  "PENDIK-X01309HT2DD8Q10": {
+    "main": "195.174.216.163",
+    "notes": "Pendik"
+  },
+  "SERIFALI-X01309HT2DD8Q10": {
+    "main": "5.47.146.5",
+    "notes": "Şerifali"
+  }
+}
