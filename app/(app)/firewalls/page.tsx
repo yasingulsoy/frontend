@@ -1,7 +1,7 @@
 import { Badge, Card, Dot, ErrorBox, StatCard } from "@/components/ui";
 import type {
   EnrichedFirewall,
-  WanSide,
+  GatewayLinkState,
 } from "@/lib/sophos/aggregate";
 import { getFirewallDashboardData } from "@/lib/sophos/aggregate";
 
@@ -25,10 +25,11 @@ export default async function FirewallsPage({
     <main className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
       <header className="mb-5">
         <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">
-          Firewall'lar
+          Firewalls
         </h1>
         <p className="mt-1 text-xs text-zinc-400 sm:text-sm">
-          Port3-WAN-Backup (Backup) · Port4-WAN-Main (Main)
+          Port4-WAN-Main (fiber) · Port3-WAN-Backup (4.5G) · Gateway durumu
+          firewall&apos;un dış IP bildirimi üzerinden türetilir.
         </p>
       </header>
 
@@ -36,7 +37,7 @@ export default async function FirewallsPage({
 
       {payload.ok && (
         <>
-          <div className="mb-5 grid grid-cols-2 gap-3 sm:mb-6 sm:grid-cols-4 sm:gap-4">
+          <div className="mb-5 grid grid-cols-2 gap-3 sm:mb-6 sm:grid-cols-3 sm:gap-4 lg:grid-cols-6">
             <StatCard label="Toplam" value={payload.summary.firewallCount} />
             <StatCard
               label="Bağlı"
@@ -52,6 +53,18 @@ export default async function FirewallsPage({
               label="Askıda"
               value={payload.summary.suspendedCount}
               tone={payload.summary.suspendedCount > 0 ? "warn" : "muted"}
+            />
+            <StatCard
+              label="Yedekte (4.5G)"
+              value={payload.summary.onBackupCount}
+              tone={payload.summary.onBackupCount > 0 ? "warn" : "muted"}
+              hint="Main down, Backup taşıyor"
+            />
+            <StatCard
+              label="Her iki hat down"
+              value={payload.summary.bothDownCount}
+              tone={payload.summary.bothDownCount > 0 ? "down" : "muted"}
+              hint="Main ve Backup yok"
             />
           </div>
 
@@ -73,6 +86,8 @@ export default async function FirewallsPage({
               <option value="all">Tüm durumlar</option>
               <option value="online">Sadece bağlı</option>
               <option value="offline">Sadece offline</option>
+              <option value="on-backup">Yedekte (4.5G)</option>
+              <option value="both-down">Her iki hat down</option>
               <option value="wan-degraded">WAN bozuk</option>
             </select>
             <select
@@ -133,7 +148,7 @@ export default async function FirewallsPage({
                         </ul>
                         {/* Masaüstü: tablo */}
                         <div className="hidden overflow-x-auto md:block">
-                          <table className="w-full min-w-[960px] text-left text-sm">
+                          <table className="w-full min-w-[1100px] text-left text-sm">
                             <thead className="bg-zinc-900 text-xs uppercase tracking-wide text-zinc-500">
                               <tr>
                                 <th className="px-4 py-3 font-medium">
@@ -143,13 +158,16 @@ export default async function FirewallsPage({
                                   Durum
                                 </th>
                                 <th className="px-4 py-3 font-medium">
+                                  Gateway
+                                </th>
+                                <th className="px-4 py-3 font-medium">
                                   Port4 · Main
                                 </th>
                                 <th className="px-4 py-3 font-medium">
                                   Port3 · Backup
                                 </th>
                                 <th className="px-4 py-3 font-medium">
-                                  Dış IP'ler
+                                  External IPs
                                 </th>
                                 <th className="px-4 py-3 font-medium">
                                   Model
@@ -188,63 +206,86 @@ function matchFilter(
   const isOnline = fw.connected && !fw.suspended;
   if (status === "online" && !isOnline) return false;
   if (status === "offline" && isOnline) return false;
-  if (status === "wan-degraded") {
-    if (!fw.wan.hasMapping) return false;
-    const mainOk = fw.wan.main.seen === true;
-    const backupOk = fw.wan.backup.seen === true;
-    if (isOnline && mainOk && backupOk) return false;
+  if (status === "on-backup" && !fw.gateway.onBackup) return false;
+  if (status === "both-down") {
     if (!isOnline) return false;
+    if (fw.gateway.active !== "none") return false;
+  }
+  if (status === "wan-degraded") {
+    if (!isOnline) return false;
+    if (!fw.wan.hasMapping) return false;
+    if (fw.gateway.active === "main" && fw.gateway.backup !== "down") {
+      return false;
+    }
   }
   return true;
 }
 
-function WanCell({
-  side,
-  connected,
+function GatewayLinkBadge({
+  label,
+  state,
+  ip,
 }: {
-  side: WanSide;
-  connected: boolean;
+  label: string;
+  state: GatewayLinkState;
+  ip?: string;
 }) {
-  if (side.configuredIp === undefined) {
+  const map: Record<
+    GatewayLinkState,
+    { tone: "up" | "down" | "muted" | "warn"; text: string }
+  > = {
+    up: { tone: "up", text: "aktif" },
+    down: { tone: "down", text: "down" },
+    "not-configured": { tone: "muted", text: "eşleme yok" },
+    unknown: { tone: "muted", text: "bilinmiyor" },
+  };
+  const meta = map[state];
+  return (
+    <div className="space-y-1">
+      <Badge tone={meta.tone}>
+        <Dot tone={meta.tone} /> {label} · {meta.text}
+      </Badge>
+      {ip && (
+        <div className="font-mono text-[11px] text-zinc-500">{ip}</div>
+      )}
+    </div>
+  );
+}
+
+function GatewayActiveBadge({ fw }: { fw: EnrichedFirewall }) {
+  const g = fw.gateway;
+  if (!fw.connected || fw.suspended) {
     return (
-      <div className="text-zinc-500">
-        <Badge tone="muted">eşleme yok</Badge>
-      </div>
+      <Badge tone="muted">
+        <Dot tone="muted" /> gateway bilinmiyor
+      </Badge>
     );
   }
-  if (!connected) {
+  if (g.active === "main") {
     return (
-      <div className="space-y-1">
-        <Badge tone="down">
-          <Dot tone="down" /> kapalı
-        </Badge>
-        <div className="font-mono text-[11px] text-zinc-500">
-          {side.configuredIp}
-        </div>
-      </div>
+      <Badge tone="up">
+        <Dot tone="up" /> Main aktif · fiber
+      </Badge>
     );
   }
-  if (side.seen) {
+  if (g.active === "backup") {
     return (
-      <div className="space-y-1">
-        <Badge tone="up">
-          <Dot tone="up" /> aktif
-        </Badge>
-        <div className="font-mono text-[11px] text-zinc-500">
-          {side.configuredIp}
-        </div>
-      </div>
+      <Badge tone="warn">
+        <Dot tone="warn" /> Yedekte · 4.5G
+      </Badge>
+    );
+  }
+  if (g.active === "none") {
+    return (
+      <Badge tone="down">
+        <Dot tone="down" /> her iki hat down
+      </Badge>
     );
   }
   return (
-    <div className="space-y-1">
-      <Badge tone="down">
-        <Dot tone="down" /> IP yok
-      </Badge>
-      <div className="font-mono text-[11px] text-zinc-500">
-        {side.configuredIp}
-      </div>
-    </div>
+    <Badge tone="muted">
+      <Dot tone="muted" /> gateway bilinmiyor
+    </Badge>
   );
 }
 
@@ -269,7 +310,6 @@ function StatusBadge({ fw }: { fw: EnrichedFirewall }) {
 }
 
 function FirewallCard({ fw }: { fw: EnrichedFirewall }) {
-  const connected = fw.connected && !fw.suspended;
   return (
     <li className="px-4 py-4">
       <div className="flex items-start justify-between gap-3">
@@ -288,18 +328,35 @@ function FirewallCard({ fw }: { fw: EnrichedFirewall }) {
         <StatusBadge fw={fw} />
       </div>
 
+      <div className="mt-3">
+        <GatewayActiveBadge fw={fw} />
+        {fw.gateway.onBackup && (
+          <p className="mt-1 text-[11px] text-amber-300/80">
+            {fw.gateway.reason}
+          </p>
+        )}
+      </div>
+
       <div className="mt-3 grid grid-cols-2 gap-3">
         <div>
           <div className="mb-1 text-[10px] uppercase tracking-wide text-zinc-500">
             Port4 · Main
           </div>
-          <WanCell side={fw.wan.main} connected={connected} />
+          <GatewayLinkBadge
+            label="Main"
+            state={fw.gateway.main}
+            ip={fw.wan.main.configuredIp}
+          />
         </div>
         <div>
           <div className="mb-1 text-[10px] uppercase tracking-wide text-zinc-500">
             Port3 · Backup
           </div>
-          <WanCell side={fw.wan.backup} connected={connected} />
+          <GatewayLinkBadge
+            label="Backup"
+            state={fw.gateway.backup}
+            ip={fw.wan.backup.configuredIp}
+          />
         </div>
       </div>
 
@@ -336,8 +393,6 @@ function FirewallCard({ fw }: { fw: EnrichedFirewall }) {
 }
 
 function FirewallRow({ fw }: { fw: EnrichedFirewall }) {
-  const connected = fw.connected && !fw.suspended;
-
   return (
     <tr className="align-top">
       <td className="px-4 py-3">
@@ -358,10 +413,31 @@ function FirewallRow({ fw }: { fw: EnrichedFirewall }) {
         )}
       </td>
       <td className="px-4 py-3">
-        <WanCell side={fw.wan.main} connected={connected} />
+        <GatewayActiveBadge fw={fw} />
+        {fw.gateway.onBackup && (
+          <div className="mt-1 text-[11px] text-amber-300/80">
+            Main down → 4.5G aktif
+          </div>
+        )}
+        {fw.gateway.active === "none" && (
+          <div className="mt-1 text-[11px] text-red-300/80">
+            Hiç dış IP yok
+          </div>
+        )}
       </td>
       <td className="px-4 py-3">
-        <WanCell side={fw.wan.backup} connected={connected} />
+        <GatewayLinkBadge
+          label="Main"
+          state={fw.gateway.main}
+          ip={fw.wan.main.configuredIp}
+        />
+      </td>
+      <td className="px-4 py-3">
+        <GatewayLinkBadge
+          label="Backup"
+          state={fw.gateway.backup}
+          ip={fw.wan.backup.configuredIp}
+        />
       </td>
       <td className="px-4 py-3">
         {fw.externalIpv4Addresses.length === 0 ? (

@@ -10,6 +10,37 @@ export type WanSide = {
   seen?: boolean;
 };
 
+/**
+ * Tek bir WAN hattının (Main / Backup) o anki durumu.
+ *
+ *  - `up`             : Yapılandırılmış IP, Sophos'un döndüğü
+ *                       `externalIpv4Addresses` listesinde görünüyor → hat aktif.
+ *  - `down`           : Yapılandırılmış IP var, ama dışa çıkan IP listesinde yok
+ *                       → hat şu an trafik taşımıyor.
+ *  - `not-configured` : Harita dosyasında bu taraf için IP tanımlı değil.
+ *  - `unknown`        : Cihaz Sophos Central'a bağlı değil, karar verilemiyor.
+ */
+export type GatewayLinkState = "up" | "down" | "not-configured" | "unknown";
+
+/**
+ * Sophos Central Firewall API portlar için doğrudan up/down bayrağı
+ * dönmüyor. "Hangi gateway şu an trafik taşıyor?" bilgisi, firewall'un
+ * Sophos'a bildirdiği dış (public) IP'lerden türetiliyor:
+ *
+ *   Main IP listede var   → Main aktif (normal çalışma)
+ *   Main yok, Backup var → Backup aktif → şube 4.5G üzerinde (onBackup)
+ *   İkisi de yok          → her iki hat da down
+ *
+ * Cihaz `connected=false` ise `active = "unknown"` döner.
+ */
+export type GatewayStatus = {
+  main: GatewayLinkState;
+  backup: GatewayLinkState;
+  active: "main" | "backup" | "none" | "unknown";
+  onBackup: boolean;
+  reason: string;
+};
+
 export type EnrichedFirewall = {
   tenantId: string;
   id: string;
@@ -32,6 +63,7 @@ export type EnrichedFirewall = {
     hasMapping: boolean;
     notes?: string;
   };
+  gateway: GatewayStatus;
   raw: FirewallRecord;
 };
 
@@ -56,10 +88,88 @@ export type FirewallDashboardPayload =
         connectedCount: number;
         offlineCount: number;
         suspendedCount: number;
+        /** Main hattı düşmüş, Backup (4.5G) taşıyan şube sayısı. */
+        onBackupCount: number;
+        /** Main + Backup ikisi de down (cihaz bağlı olsa bile trafik yok). */
+        bothDownCount: number;
       };
       data: TenantFirewalls[];
     }
   | { ok: false; error: string; code: "missing_env" | "upstream" };
+
+function deriveGatewayStatus(
+  connected: boolean,
+  suspended: boolean,
+  wan: EnrichedFirewall["wan"],
+): GatewayStatus {
+  const mainConfigured = Boolean(wan.main.configuredIp);
+  const backupConfigured = Boolean(wan.backup.configuredIp);
+  const mainSeen = wan.main.seen === true;
+  const backupSeen = wan.backup.seen === true;
+
+  if (!connected || suspended) {
+    return {
+      main: mainConfigured ? "unknown" : "not-configured",
+      backup: backupConfigured ? "unknown" : "not-configured",
+      active: "unknown",
+      onBackup: false,
+      reason: suspended
+        ? "Cihaz askıda; gateway durumu doğrulanamıyor."
+        : "Cihaz Sophos Central'a bağlı değil; gateway durumu doğrulanamıyor.",
+    };
+  }
+
+  if (!wan.hasMapping) {
+    return {
+      main: "not-configured",
+      backup: "not-configured",
+      active: "unknown",
+      onBackup: false,
+      reason: "Firewall için Main/Backup IP eşlemesi tanımlı değil.",
+    };
+  }
+
+  const main: GatewayLinkState = mainConfigured
+    ? mainSeen
+      ? "up"
+      : "down"
+    : "not-configured";
+  const backup: GatewayLinkState = backupConfigured
+    ? backupSeen
+      ? "up"
+      : "down"
+    : "not-configured";
+
+  if (main === "up") {
+    return {
+      main,
+      backup,
+      active: "main",
+      onBackup: false,
+      reason: "Main gateway aktif; trafik fiber üzerinden gidiyor.",
+    };
+  }
+
+  if (backup === "up") {
+    return {
+      main,
+      backup,
+      active: "backup",
+      onBackup: true,
+      reason:
+        "Main gateway down; şube yedek hat (4.5G) üzerinden internete çıkıyor.",
+    };
+  }
+
+  return {
+    main,
+    backup,
+    active: "none",
+    onBackup: false,
+    reason:
+      "Main ve Backup IP'lerinin hiçbiri firewall'un dış IP listesinde görünmüyor; her iki hat da down.",
+  };
+}
 
 function enrich(
   fw: FirewallRecord,
@@ -95,6 +205,10 @@ function enrich(
     group?: { id?: string; name?: string };
   }).group;
 
+  const connected = fw.status?.connected ?? false;
+  const suspended = fw.status?.suspended ?? false;
+  const gateway = deriveGatewayStatus(connected, suspended, wan);
+
   return {
     tenantId,
     id: fw.id,
@@ -103,8 +217,8 @@ function enrich(
     serialNumber: fw.serialNumber ?? null,
     model: fw.model ?? null,
     firmwareVersion: fw.firmwareVersion ?? null,
-    connected: fw.status?.connected ?? false,
-    suspended: fw.status?.suspended ?? false,
+    connected,
+    suspended,
     managing: fw.status?.managing ?? null,
     externalIpv4Addresses: fw.externalIpv4Addresses ?? [],
     stateChangedAt: fw.stateChangedAt ?? null,
@@ -112,6 +226,7 @@ function enrich(
     groupId: rawGroup?.id ?? null,
     groupName: rawGroup?.name ?? null,
     wan,
+    gateway,
     raw: fw,
   };
 }
@@ -152,6 +267,11 @@ export async function getFirewallDashboardData(): Promise<FirewallDashboardPaylo
         connectedCount: all.filter((x) => x.connected && !x.suspended).length,
         offlineCount: all.filter((x) => !x.connected && !x.suspended).length,
         suspendedCount: all.filter((x) => x.suspended).length,
+        onBackupCount: all.filter((x) => x.gateway.onBackup).length,
+        bothDownCount: all.filter(
+          (x) =>
+            x.connected && !x.suspended && x.gateway.active === "none",
+        ).length,
       },
       data,
     };
