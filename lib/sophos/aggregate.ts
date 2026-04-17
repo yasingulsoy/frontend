@@ -1,13 +1,24 @@
 import type { FirewallRecord } from "./firewalls";
 import { listFirewallsForTenant } from "./firewalls";
+import type { ProbeResult } from "./probe";
+import { pingHostsPooled } from "./probe";
 import { getSession } from "./session";
-import type { TenantRow } from "./types";
 import type { WanMapEntry } from "./wan-map";
 import { findMapping, loadWanMap } from "./wan-map";
 
+export type ProbeOutcome = {
+  checked: boolean;
+  alive?: boolean;
+  rttMs?: number | null;
+  reason?: string;
+};
+
 export type WanSide = {
   configuredIp?: string;
+  /** Sophos'un `externalIpv4Addresses`'ında görünüyor mu (pasif sinyal). */
   seen?: boolean;
+  /** Aktif ICMP sonda sonucu. */
+  probe?: ProbeOutcome;
 };
 
 /**
@@ -23,21 +34,25 @@ export type WanSide = {
 export type GatewayLinkState = "up" | "down" | "not-configured" | "unknown";
 
 /**
- * Sophos Central Firewall API portlar için doğrudan up/down bayrağı
- * dönmüyor. "Hangi gateway şu an trafik taşıyor?" bilgisi, firewall'un
- * Sophos'a bildirdiği dış (public) IP'lerden türetiliyor:
+ * "Hangi gateway şu an trafik taşıyor?" iki sinyalden çıkarılır:
  *
- *   Main IP listede var   → Main aktif (normal çalışma)
- *   Main yok, Backup var → Backup aktif → şube 4.5G üzerinde (onBackup)
- *   İkisi de yok          → her iki hat da down
+ * 1) Pasif: Sophos Central'ın `externalIpv4Addresses` dizisi — firewall'un
+ *    son bildirdiği dış IP. (Main IP listede → Main aktif, vb.)
  *
- * Cihaz `connected=false` ise `active = "unknown"` döner.
+ * 2) Aktif: Sunucudan ICMP ping — Main ve Backup public IP'lere doğrudan
+ *    ping. `WAN_PROBE_ENABLED=true` ise probe sonucu pasif sinyali
+ *    geçersiz kılar, çünkü gerçek zamanlı ve kesindir.
+ *
+ * Cihaz `connected=false` ise pasif sinyal güvenilmez; bu durumda
+ * yalnızca probe sonuçları kullanılır (probe açıksa).
  */
 export type GatewayStatus = {
   main: GatewayLinkState;
   backup: GatewayLinkState;
   active: "main" | "backup" | "none" | "unknown";
   onBackup: boolean;
+  /** Kararın hangi kaynağa dayandığı. */
+  source: "probe" | "passive" | "probe+passive" | "none";
   reason: string;
 };
 
@@ -97,6 +112,16 @@ export type FirewallDashboardPayload =
     }
   | { ok: false; error: string; code: "missing_env" | "upstream" };
 
+function stateFor(
+  configured: boolean,
+  seen: boolean,
+  probe: ProbeOutcome | undefined,
+): GatewayLinkState {
+  if (!configured) return "not-configured";
+  if (probe?.checked) return probe.alive ? "up" : "down";
+  return seen ? "up" : "down";
+}
+
 function deriveGatewayStatus(
   connected: boolean,
   suspended: boolean,
@@ -104,20 +129,9 @@ function deriveGatewayStatus(
 ): GatewayStatus {
   const mainConfigured = Boolean(wan.main.configuredIp);
   const backupConfigured = Boolean(wan.backup.configuredIp);
-  const mainSeen = wan.main.seen === true;
-  const backupSeen = wan.backup.seen === true;
-
-  if (!connected || suspended) {
-    return {
-      main: mainConfigured ? "unknown" : "not-configured",
-      backup: backupConfigured ? "unknown" : "not-configured",
-      active: "unknown",
-      onBackup: false,
-      reason: suspended
-        ? "Cihaz askıda; gateway durumu doğrulanamıyor."
-        : "Cihaz Sophos Central'a bağlı değil; gateway durumu doğrulanamıyor.",
-    };
-  }
+  const mainProbe = wan.main.probe;
+  const backupProbe = wan.backup.probe;
+  const probedAny = mainProbe?.checked || backupProbe?.checked;
 
   if (!wan.hasMapping) {
     return {
@@ -125,20 +139,36 @@ function deriveGatewayStatus(
       backup: "not-configured",
       active: "unknown",
       onBackup: false,
+      source: "none",
       reason: "Firewall için Main/Backup IP eşlemesi tanımlı değil.",
     };
   }
 
-  const main: GatewayLinkState = mainConfigured
-    ? mainSeen
-      ? "up"
-      : "down"
-    : "not-configured";
-  const backup: GatewayLinkState = backupConfigured
-    ? backupSeen
-      ? "up"
-      : "down"
-    : "not-configured";
+  if ((!connected || suspended) && !probedAny) {
+    return {
+      main: mainConfigured ? "unknown" : "not-configured",
+      backup: backupConfigured ? "unknown" : "not-configured",
+      active: "unknown",
+      onBackup: false,
+      source: "none",
+      reason: suspended
+        ? "Cihaz askıda; gateway durumu doğrulanamıyor."
+        : "Cihaz Sophos Central'a bağlı değil; gateway durumu doğrulanamıyor.",
+    };
+  }
+
+  const mainSeen = wan.main.seen === true;
+  const backupSeen = wan.backup.seen === true;
+  const main = stateFor(mainConfigured, mainSeen, mainProbe);
+  const backup = stateFor(backupConfigured, backupSeen, backupProbe);
+
+  const source: GatewayStatus["source"] = probedAny
+    ? connected
+      ? "probe+passive"
+      : "probe"
+    : "passive";
+
+  const probeTag = probedAny ? " (ICMP ile doğrulandı)" : "";
 
   if (main === "up") {
     return {
@@ -146,7 +176,8 @@ function deriveGatewayStatus(
       backup,
       active: "main",
       onBackup: false,
-      reason: "Main gateway aktif; trafik fiber üzerinden gidiyor.",
+      source,
+      reason: `Main gateway aktif; trafik fiber üzerinden gidiyor.${probeTag}`,
     };
   }
 
@@ -156,8 +187,8 @@ function deriveGatewayStatus(
       backup,
       active: "backup",
       onBackup: true,
-      reason:
-        "Main gateway down; şube yedek hat (4.5G) üzerinden internete çıkıyor.",
+      source,
+      reason: `Main gateway down; şube yedek hat (4.5G) üzerinden internete çıkıyor.${probeTag}`,
     };
   }
 
@@ -166,14 +197,27 @@ function deriveGatewayStatus(
     backup,
     active: "none",
     onBackup: false,
-    reason:
-      "Main ve Backup IP'lerinin hiçbiri firewall'un dış IP listesinde görünmüyor; her iki hat da down.",
+    source,
+    reason: probedAny
+      ? "Main ve Backup IP'lerinin hiçbiri ping'e cevap vermiyor; her iki hat da down."
+      : "Main ve Backup IP'lerinin hiçbiri firewall'un dış IP listesinde görünmüyor; her iki hat da down.",
+  };
+}
+
+function toOutcome(probe: ProbeResult | undefined): ProbeOutcome | undefined {
+  if (!probe) return { checked: false };
+  return {
+    checked: true,
+    alive: probe.alive,
+    rttMs: probe.rttMs,
+    reason: probe.reason,
   };
 }
 
 function enrich(
   fw: FirewallRecord,
   tenantId: string,
+  probes: Map<string, ProbeResult> | null,
 ): EnrichedFirewall {
   const map = loadWanMap();
   const mapping: WanMapEntry | undefined = findMapping(map, [
@@ -186,6 +230,13 @@ function enrich(
     (fw.externalIpv4Addresses ?? []).map((s) => s.trim()),
   );
 
+  const pickProbe = (ip?: string): ProbeOutcome | undefined => {
+    if (!ip) return undefined;
+    if (!probes) return { checked: false };
+    const r = probes.get(ip);
+    return toOutcome(r);
+  };
+
   const wan: EnrichedFirewall["wan"] = mapping
     ? {
         hasMapping: true,
@@ -193,10 +244,12 @@ function enrich(
         main: {
           configuredIp: mapping.main,
           seen: mapping.main ? ipSet.has(mapping.main) : undefined,
+          probe: pickProbe(mapping.main),
         },
         backup: {
           configuredIp: mapping.backup,
           seen: mapping.backup ? ipSet.has(mapping.backup) : undefined,
+          probe: pickProbe(mapping.backup),
         },
       }
     : { hasMapping: false, main: {}, backup: {} };
@@ -231,31 +284,62 @@ function enrich(
   };
 }
 
-async function fetchForTenant(
-  token: string,
-  t: TenantRow,
-): Promise<TenantFirewalls> {
-  const firewalls = await listFirewallsForTenant(token, t);
-  const enriched = firewalls.map((fw) => enrich(fw, t.id));
-  enriched.sort((a, b) => a.hostname.localeCompare(b.hostname, "tr"));
-  return {
-    tenant: {
-      id: t.id,
-      name: t.name ?? null,
-      dataRegion: t.dataRegion ?? null,
-      apiHost: t.apiHost,
-    },
-    count: firewalls.length,
-    firewalls: enriched,
-  };
+function probeEnabled(): boolean {
+  const v = process.env.WAN_PROBE_ENABLED?.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes" || v === "on";
+}
+
+function collectMappedIps(firewalls: FirewallRecord[]): string[] {
+  const map = loadWanMap();
+  const set = new Set<string>();
+  for (const fw of firewalls) {
+    const mapping = findMapping(map, [fw.hostname, fw.name, fw.serialNumber]);
+    if (!mapping) continue;
+    if (mapping.main) set.add(mapping.main);
+    if (mapping.backup) set.add(mapping.backup);
+  }
+  return Array.from(set);
 }
 
 export async function getFirewallDashboardData(): Promise<FirewallDashboardPayload> {
   try {
     const { token, me, tenants } = await getSession();
-    const data = await Promise.all(
-      tenants.map((t) => fetchForTenant(token, t)),
+
+    const allFirewallsPerTenant = await Promise.all(
+      tenants.map((t) =>
+        listFirewallsForTenant(token, t).then((fws) => ({ t, fws })),
+      ),
     );
+
+    let probes: Map<string, ProbeResult> | null = null;
+    if (probeEnabled()) {
+      const ips = collectMappedIps(
+        allFirewallsPerTenant.flatMap((x) => x.fws),
+      );
+      if (ips.length > 0) {
+        const timeoutMs = Number(process.env.WAN_PROBE_TIMEOUT_MS ?? 1500);
+        const concurrency = Number(process.env.WAN_PROBE_CONCURRENCY ?? 16);
+        probes = await pingHostsPooled(ips, {
+          timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : 1500,
+          concurrency: Number.isFinite(concurrency) ? concurrency : 16,
+        });
+      }
+    }
+
+    const data = allFirewallsPerTenant.map(({ t, fws }) => {
+      const enriched = fws.map((fw) => enrich(fw, t.id, probes));
+      enriched.sort((a, b) => a.hostname.localeCompare(b.hostname, "tr"));
+      return {
+        tenant: {
+          id: t.id,
+          name: t.name ?? null,
+          dataRegion: t.dataRegion ?? null,
+          apiHost: t.apiHost,
+        },
+        count: fws.length,
+        firewalls: enriched,
+      } satisfies TenantFirewalls;
+    });
 
     const all = data.flatMap((b) => b.firewalls);
     return {

@@ -28,8 +28,9 @@ export default async function FirewallsPage({
           Firewalls
         </h1>
         <p className="mt-1 text-xs text-zinc-400 sm:text-sm">
-          Port4-WAN-Main (fiber) · Port3-WAN-Backup (4.5G) · Gateway durumu
-          firewall&apos;un dış IP bildirimi üzerinden türetilir.
+          Port4-WAN-Main (fiber) · Port3-WAN-Backup (4.5G) · Gateway durumu,
+          Main/Backup public IP&apos;lere atılan ICMP ping ile doğrulanır;
+          Sophos Central&apos;ın dış IP bildirimi ek sinyal olarak kullanılır.
         </p>
       </header>
 
@@ -225,10 +226,12 @@ function GatewayLinkBadge({
   label,
   state,
   ip,
+  probe,
 }: {
   label: string;
   state: GatewayLinkState;
   ip?: string;
+  probe?: EnrichedFirewall["wan"]["main"]["probe"];
 }) {
   const map: Record<
     GatewayLinkState,
@@ -240,6 +243,8 @@ function GatewayLinkBadge({
     unknown: { tone: "muted", text: "bilinmiyor" },
   };
   const meta = map[state];
+  const probed = probe?.checked === true;
+  const rtt = probe?.rttMs;
   return (
     <div className="space-y-1">
       <Badge tone={meta.tone}>
@@ -247,6 +252,19 @@ function GatewayLinkBadge({
       </Badge>
       {ip && (
         <div className="font-mono text-[11px] text-zinc-500">{ip}</div>
+      )}
+      {probed && (
+        <div className="text-[11px] text-zinc-500">
+          {probe?.alive ? (
+            <span className="text-emerald-300/90">
+              ping ✓{typeof rtt === "number" ? ` ${rtt}ms` : ""}
+            </span>
+          ) : (
+            <span className="text-red-300/90">
+              ping ✗{probe?.reason ? ` · ${probe.reason}` : ""}
+            </span>
+          )}
+        </div>
       )}
     </div>
   );
@@ -346,6 +364,7 @@ function FirewallCard({ fw }: { fw: EnrichedFirewall }) {
             label="Main"
             state={fw.gateway.main}
             ip={fw.wan.main.configuredIp}
+            probe={fw.wan.main.probe}
           />
         </div>
         <div>
@@ -356,6 +375,7 @@ function FirewallCard({ fw }: { fw: EnrichedFirewall }) {
             label="Backup"
             state={fw.gateway.backup}
             ip={fw.wan.backup.configuredIp}
+            probe={fw.wan.backup.probe}
           />
         </div>
       </div>
@@ -430,6 +450,7 @@ function FirewallRow({ fw }: { fw: EnrichedFirewall }) {
           label="Main"
           state={fw.gateway.main}
           ip={fw.wan.main.configuredIp}
+          probe={fw.wan.main.probe}
         />
       </td>
       <td className="px-4 py-3">
@@ -437,6 +458,7 @@ function FirewallRow({ fw }: { fw: EnrichedFirewall }) {
           label="Backup"
           state={fw.gateway.backup}
           ip={fw.wan.backup.configuredIp}
+          probe={fw.wan.backup.probe}
         />
       </td>
       <td className="px-4 py-3">
