@@ -15,8 +15,8 @@
     "notes": "Bağcılar"
   },
   "BAKIRKOY-X01309HT2DD8Q10": {
-    "main": "95.173.6.61",
-    "backup": "195.174.221.15",
+    "main": "195.174.221.15",
+    "backup": "95.173.6.61",
     "notes": "Bakırköy"
   },
   "BODRUM-X01309HT2DD8Q10": {

@@ -167,7 +167,7 @@ export default async function FirewallsPage({
                                   Port3 · Backup
                                 </th>
                                 <th className="px-4 py-3 font-medium">
-                                  External IPs
+                                  Dış ipler
                                 </th>
                                 <th className="px-4 py-3 font-medium">
                                   Model
