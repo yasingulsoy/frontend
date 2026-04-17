@@ -1,0 +1,3 @@
+# Dokploy / Nixpacks: Next.js 16 için Node >= 20.9 gerekir (varsayılan 18 ile build kırılır).
+[variables]
+NIXPACKS_NODE_VERSION = "20"
